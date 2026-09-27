@@ -1,0 +1,23 @@
+{
+  "name": "keyboard-functionality-checker",
+  "version": "1.0.0",
+  "description": "Checks the functionality of your keyboard keys through the use of Three.js and a 3D interactive model.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "repository": {
+    "type": "git",
+    "url": "http://localhost:26831/127001-crtl/Keyboard-Functionality-Checker"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "three": "^0.186.1"
+  },
+  "devDependencies": {
+    "vite": "^8.3.1"
+  }
+}

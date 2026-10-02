@@ -1,15 +1,474 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Keyboard Functionality Checker</title>
-  </head>
-  <body>
-    <main>
-      <h1>Keyboard Functionality Checker</h1>
-      <p>Three.js environment is ready.</p>
-    </main>
-    <script type="module" src="/main.js"></script>
-  </body>
+<head>
+<meta charset="UTF-8" />
+<title>Reactive Keyboard — rafaelk.me</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: #05050a;
+    overflow: hidden;
+    cursor: none; /* mouse is disabled / hidden everywhere on the page */
+    user-select: none;
+  }
+  canvas { display: block; }
+  #hint {
+    position: fixed;
+    bottom: 18px;
+    left: 50%;
+    transform: translateX(-50%);
+    color: rgba(255,255,255,0.45);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 13px;
+    letter-spacing: 0.04em;
+    pointer-events: none;
+    text-align: center;
+  }
+  #hint b { color: rgba(255,255,255,0.75); }
+</style>
+</head>
+<body>
+
+<div id="hint">Press any key on your keyboard — <b>mouse input is disabled</b> on this page.</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  /* ============================================================
+     0. DISABLE THE MOUSE
+     We block clicks, context menu, wheel, and all pointer/mouse
+     events from having any effect on the page, and hide the
+     cursor via CSS (cursor: none) above.
+  ============================================================ */
+  ["click", "mousedown", "mouseup", "mousemove", "contextmenu",
+   "wheel", "dblclick", "auxclick", "pointerdown", "pointerup",
+   "pointermove"].forEach(function (evt) {
+    window.addEventListener(evt, function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }, { capture: true, passive: false });
+  });
+
+  /* ============================================================
+     1. THREE.JS SCENE SETUP
+  ============================================================ */
+  var scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x05050a);
+  scene.fog = new THREE.FogExp2(0x05050a, 0.045);
+
+  var camera = new THREE.PerspectiveCamera(
+    45, window.innerWidth / window.innerHeight, 0.1, 100
+  );
+  camera.position.set(0, 7.5, 7.2);
+  camera.lookAt(0, 0, 0.3);
+
+  var renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  document.body.appendChild(renderer.domElement);
+  renderer.domElement.style.pointerEvents = "none"; // belt & braces: canvas ignores mouse
+
+  window.addEventListener("resize", function () {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  });
+
+  // Lighting
+  var hemi = new THREE.HemisphereLight(0x8fb6ff, 0x0a0a12, 0.55);
+  scene.add(hemi);
+
+  var key = new THREE.DirectionalLight(0xffffff, 0.9);
+  key.position.set(4, 9, 5);
+  key.castShadow = true;
+  key.shadow.mapSize.set(2048, 2048);
+  key.shadow.camera.left = -8;
+  key.shadow.camera.right = 8;
+  key.shadow.camera.top = 8;
+  key.shadow.camera.bottom = -8;
+  scene.add(key);
+
+  var rim = new THREE.PointLight(0x5ad1ff, 1.1, 20);
+  rim.position.set(-5, 4, -4);
+  scene.add(rim);
+
+  var rim2 = new THREE.PointLight(0xff6bd6, 0.7, 20);
+  rim2.position.set(5, 3, -3);
+  scene.add(rim2);
+
+  // Floor (reflective-ish dark plane)
+  var floorMat = new THREE.MeshStandardMaterial({
+    color: 0x0b0b12, roughness: 0.4, metalness: 0.6
+  });
+  var floor = new THREE.Mesh(new THREE.PlaneGeometry(60, 60), floorMat);
+  floor.rotation.x = -Math.PI / 2;
+  floor.position.y = -0.62;
+  floor.receiveShadow = true;
+  scene.add(floor);
+
+  // Base/chassis of the keyboard
+  var baseGeo = new THREE.BoxGeometry(1, 1, 1);
+  var baseMat = new THREE.MeshStandardMaterial({
+    color: 0x16161d, roughness: 0.55, metalness: 0.35
+  });
+
+  /* ============================================================
+     2. PROCEDURAL KEYBOARD MODEL
+     A grid of keycaps built from THREE primitives, standing in
+     for an imported 3D keyboard model so the page needs no
+     external model/asset files to work.
+  ============================================================ */
+  var ROWS = [
+    "1234567890-=",
+    "QWERTYUIOP[]",
+    "ASDFGHJKL;'\\",
+    "ZXCVBNM,./"
+  ];
+
+  var KEY_SIZE = 0.52;
+  var KEY_GAP = 0.08;
+  var KEY_HEIGHT = 0.26;
+  var PRESS_DEPTH = 0.12;
+
+  var keyGroup = new THREE.Group();
+  scene.add(keyGroup);
+
+  // chassis sized to the grid
+  var maxCols = Math.max.apply(null, ROWS.map(function (r) { return r.length; }));
+  var gridW = maxCols * (KEY_SIZE + KEY_GAP);
+  var gridD = ROWS.length * (KEY_SIZE + KEY_GAP);
+
+  var chassis = new THREE.Mesh(baseGeo, baseMat);
+  chassis.scale.set(gridW + 0.6, 0.5, gridD + 0.9);
+  chassis.position.set(0, -0.25, 0.1);
+  chassis.castShadow = true;
+  chassis.receiveShadow = true;
+  scene.add(chassis);
+
+  // keycap material (slightly translucent, lit from inside when pressed)
+  function makeKeycapMaterial() {
+    return new THREE.MeshStandardMaterial({
+      color: 0x22222c,
+      roughness: 0.35,
+      metalness: 0.1,
+      emissive: 0x000000,
+      emissiveIntensity: 0,
+    });
+  }
+
+  // Mapping from physical KeyboardEvent.code / key to a mesh
+  var keyMeshes = {}; // code -> {mesh, baseY, label, pressed, anim}
+
+  function codeFromChar(ch) {
+    // Build a best-effort mapping from the character to a KeyboardEvent.code
+    if (/[0-9]/.test(ch)) {
+      var digitNames = ["Zero","One","Two","Three","Four","Five","Six","Seven","Eight","Nine"];
+      return "Digit" + ch;
+    }
+    if (/[A-Z]/.test(ch)) return "Key" + ch;
+    var map = {
+      "-": "Minus", "=": "Equal", "[": "BracketLeft", "]": "BracketRight",
+      ";": "Semicolon", "'": "Quote", "\\": "Backslash",
+      ",": "Comma", ".": "Period", "/": "Slash"
+    };
+    return map[ch] || ch;
+  }
+
+  ROWS.forEach(function (row, rowIdx) {
+    var rowLen = row.length;
+    var rowWidth = rowLen * (KEY_SIZE + KEY_GAP);
+    var startX = -rowWidth / 2 + KEY_SIZE / 2;
+    var z = -gridD / 2 + rowIdx * (KEY_SIZE + KEY_GAP) + KEY_SIZE / 2;
+
+    for (var i = 0; i < rowLen; i++) {
+      var ch = row[i];
+      var geo = new THREE.BoxGeometry(KEY_SIZE * 0.92, KEY_HEIGHT, KEY_SIZE * 0.92);
+      var mat = makeKeycapMaterial();
+      var mesh = new THREE.Mesh(geo, mat);
+      var x = startX + i * (KEY_SIZE + KEY_GAP);
+      var baseY = KEY_HEIGHT / 2;
+      mesh.position.set(x, baseY, z);
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      keyGroup.add(mesh);
+
+      var code = codeFromChar(ch);
+      keyMeshes[code] = {
+        mesh: mesh,
+        baseY: baseY,
+        baseEmissive: 0x000000,
+        pressTime: -1,
+        color: new THREE.Color().setHSL(Math.random(), 0.65, 0.55)
+      };
+    }
+  });
+
+  // Spacebar
+  var spaceWidth = 5.2;
+  var spaceGeo = new THREE.BoxGeometry(spaceWidth, KEY_HEIGHT, KEY_SIZE * 0.92);
+  var spaceMesh = new THREE.Mesh(spaceGeo, makeKeycapMaterial());
+  var spaceZ = -gridD / 2 + ROWS.length * (KEY_SIZE + KEY_GAP) + KEY_SIZE / 2;
+  spaceMesh.position.set(0, KEY_HEIGHT / 2, spaceZ);
+  spaceMesh.castShadow = true;
+  spaceMesh.receiveShadow = true;
+  keyGroup.add(spaceMesh);
+  keyMeshes["Space"] = {
+    mesh: spaceMesh,
+    baseY: KEY_HEIGHT / 2,
+    pressTime: -1,
+    color: new THREE.Color(0x66ccff)
+  };
+
+  // gentle ambient rotation of whole keyboard group for depth
+  keyGroup.rotation.x = -0.05;
+
+  /* ============================================================
+     3. WEB AUDIO — SYNTHESISED, SPATIALISED HARMONIC NOTES
+     Each key press plays a note from a pentatonic/major scale,
+     positioned at a random point in 3D space via a PannerNode,
+     so many simultaneous presses blend into a harmonic chord
+     that also sounds spatially spread out.
+  ============================================================ */
+  var AudioCtx = window.AudioContext || window.webkitAudioContext;
+  var actx = null;
+  var listenerReady = false;
+
+  function ensureAudio() {
+    if (!actx) {
+      actx = new AudioCtx();
+    }
+    if (actx.state === "suspended") {
+      actx.resume();
+    }
+  }
+
+  // A pleasant scale (C major pentatonic across a few octaves) so random
+  // notes always sound consonant together.
+  var BASE_FREQS = [261.63, 293.66, 329.63, 392.00, 440.00]; // C D E G A
+  var ALL_NOTES = [];
+  [0.5, 1, 2, 3].forEach(function (mult) {
+    BASE_FREQS.forEach(function (f) { ALL_NOTES.push(f * mult); });
+  });
+
+  function playSpatialNote(worldPos) {
+    ensureAudio();
+
+    var freq = ALL_NOTES[Math.floor(Math.random() * ALL_NOTES.length)];
+
+    var now = actx.currentTime;
+    var osc = actx.createOscillator();
+    osc.type = Math.random() < 0.5 ? "sine" : "triangle";
+    osc.frequency.setValueAtTime(freq, now);
+
+    // a touch of a second detuned oscillator for warmth
+    var osc2 = actx.createOscillator();
+    osc2.type = "sine";
+    osc2.frequency.setValueAtTime(freq * 2.005, now);
+
+    var gain = actx.createGain();
+    gain.gain.setValueAtTime(0, now);
+    gain.gain.linearRampToValueAtTime(0.5, now + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 1.8);
+
+    var gain2 = actx.createGain();
+    gain2.gain.setValueAtTime(0.0001, now);
+    gain2.gain.linearRampToValueAtTime(0.12, now + 0.02);
+    gain2.gain.exponentialRampToValueAtTime(0.0001, now + 1.2);
+
+    var panner;
+    if (actx.createPanner) {
+      panner = actx.createPanner();
+      panner.panningModel = "HRTF";
+      panner.distanceModel = "inverse";
+      panner.refDistance = 2;
+      panner.maxDistance = 40;
+      panner.rolloffFactor = 1;
+      if (panner.positionX) {
+        panner.positionX.setValueAtTime(worldPos.x, now);
+        panner.positionY.setValueAtTime(worldPos.y, now);
+        panner.positionZ.setValueAtTime(worldPos.z, now);
+      } else {
+        panner.setPosition(worldPos.x, worldPos.y, worldPos.z);
+      }
+    }
+
+    osc.connect(gain);
+    osc2.connect(gain2);
+    if (panner) {
+      gain.connect(panner);
+      gain2.connect(panner);
+      panner.connect(actx.destination);
+    } else {
+      gain.connect(actx.destination);
+      gain2.connect(actx.destination);
+    }
+
+    osc.start(now);
+    osc2.start(now);
+    osc.stop(now + 2.0);
+    osc2.stop(now + 2.0);
+  }
+
+  // Keep the audio listener roughly at the camera, oriented into the scene.
+  function updateListener() {
+    if (!actx) return;
+    var l = actx.listener;
+    var p = camera.position;
+    if (l.positionX) {
+      l.positionX.setValueAtTime(p.x, actx.currentTime);
+      l.positionY.setValueAtTime(p.y, actx.currentTime);
+      l.positionZ.setValueAtTime(p.z, actx.currentTime);
+    } else if (l.setPosition) {
+      l.setPosition(p.x, p.y, p.z);
+    }
+    var dir = new THREE.Vector3();
+    camera.getWorldDirection(dir);
+    if (l.forwardX) {
+      l.forwardX.setValueAtTime(dir.x, actx.currentTime);
+      l.forwardY.setValueAtTime(dir.y, actx.currentTime);
+      l.forwardZ.setValueAtTime(dir.z, actx.currentTime);
+      l.upX.setValueAtTime(0, actx.currentTime);
+      l.upY.setValueAtTime(1, actx.currentTime);
+      l.upZ.setValueAtTime(0, actx.currentTime);
+    } else if (l.setOrientation) {
+      l.setOrientation(dir.x, dir.y, dir.z, 0, 1, 0);
+    }
+  }
+
+  /* ============================================================
+     4. KEY PRESS -> ANIMATION + SOUND
+  ============================================================ */
+  var activeAnims = []; // {entry, start}
+
+  function triggerKeyPress(code) {
+    var entry = keyMeshes[code];
+    if (!entry) return;
+
+    ensureAudio();
+    entry.pressTime = performance.now();
+
+    // Random 3D location for the sound — scattered around/above the
+    // keyboard so many at once feel spread through the space.
+    var worldPos = new THREE.Vector3(
+      (Math.random() - 0.5) * 10,
+      Math.random() * 4 + 0.5,
+      (Math.random() - 0.5) * 10 - 1
+    );
+    playSpatialNote(worldPos);
+
+    // little particle burst / glow ring at the key for extra visual pop
+    spawnKeyGlow(entry.mesh.position, entry.color);
+  }
+
+  function releaseKey(code) {
+    var entry = keyMeshes[code];
+    if (!entry) return;
+    entry.released = performance.now();
+  }
+
+  // Simple glow-ring pool for visual flair on press
+  var glowPool = [];
+  function spawnKeyGlow(pos, color) {
+    var ring = new THREE.Mesh(
+      new THREE.RingGeometry(0.01, 0.45, 32),
+      new THREE.MeshBasicMaterial({
+        color: color, transparent: true, opacity: 0.9,
+        side: THREE.DoubleSide
+      })
+    );
+    ring.rotation.x = -Math.PI / 2;
+    ring.position.set(pos.x, 0.02, pos.z);
+    scene.add(ring);
+    glowPool.push({ mesh: ring, start: performance.now() });
+  }
+
+  function updateGlows(now) {
+    for (var i = glowPool.length - 1; i >= 0; i--) {
+      var g = glowPool[i];
+      var t = (now - g.start) / 700;
+      if (t >= 1) {
+        scene.remove(g.mesh);
+        g.mesh.geometry.dispose();
+        g.mesh.material.dispose();
+        glowPool.splice(i, 1);
+        continue;
+      }
+      var scale = 1 + t * 3.5;
+      g.mesh.scale.set(scale, scale, scale);
+      g.mesh.material.opacity = 0.9 * (1 - t);
+    }
+  }
+
+  /* ============================================================
+     5. KEYBOARD INPUT
+  ============================================================ */
+  var pressedCodes = {};
+
+  window.addEventListener("keydown", function (e) {
+    if (pressedCodes[e.code]) return; // ignore auto-repeat
+    pressedCodes[e.code] = true;
+
+    var targetCode = keyMeshes[e.code] ? e.code :
+      (e.code === "Space" ? "Space" : null);
+
+    if (!targetCode) return;
+
+    triggerKeyPress(targetCode);
+  });
+
+  window.addEventListener("keyup", function (e) {
+    delete pressedCodes[e.code];
+    if (keyMeshes[e.code]) releaseKey(e.code);
+  });
+
+  /* ============================================================
+     6. RENDER LOOP — eases keys down on press, back up on release
+  ============================================================ */
+  var clock = new THREE.Clock();
+
+  function animate() {
+    requestAnimationFrame(animate);
+    var now = performance.now();
+    var t = clock.getElapsedTime();
+
+    for (var code in keyMeshes) {
+      var entry = keyMeshes[code];
+      var mesh = entry.mesh;
+      var isDown = !!pressedCodes[code];
+
+      var targetY = isDown ? entry.baseY - PRESS_DEPTH : entry.baseY;
+      mesh.position.y += (targetY - mesh.position.y) * 0.35;
+
+      // emissive glow while held / just released, fading out
+      var glowTarget = isDown ? 0.9 : 0;
+      var mat = mesh.material;
+      if (isDown) {
+        mat.emissive.copy(entry.color);
+      }
+      mat.emissiveIntensity += (glowTarget - mat.emissiveIntensity) * 0.2;
+    }
+
+    updateGlows(now);
+    updateListener();
+
+    // subtle idle camera drift for life, independent of mouse
+    camera.position.x = Math.sin(t * 0.07) * 0.6;
+    camera.lookAt(0, 0, 0.3);
+
+    renderer.render(scene, camera);
+  }
+
+  // Resume/create the AudioContext on first key press (autoplay policies
+  // require a user gesture; a keydown counts).
+  window.addEventListener("keydown", ensureAudio, { once: true });
+
+  animate();
+})();
+</script>
+</body>
 </html>
